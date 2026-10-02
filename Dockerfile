@@ -2,8 +2,10 @@ FROM ghcr.io/imputnet/yt-session-generator:webserver
 
 USER root
 
-# Use our modified extractor.py
 COPY potoken_generator/extractor.py /app/potoken_generator/extractor.py
+
+# Verify that our modified extractor is really inside the image
+RUN grep -n "DIAGNOSTIC: launching Chromium" /app/potoken_generator/extractor.py
 
 # Cobalt 11.7.1 expects POST /get_pot
 RUN sed -i \
