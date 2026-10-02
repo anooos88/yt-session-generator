@@ -157,7 +157,7 @@ class PotokenExtractor:
 
         async with self._ongoing_update:
 
-            logger.info("update started (v7 fixed launch)")
+            logger.info("update started (v8 embed + network enable)")
 
             self._extraction_done.clear()
 
@@ -227,12 +227,16 @@ class PotokenExtractor:
                     self._send_handler,
                 )
 
+                # FIX 4: make sure the Network domain is enabled so the
+                # handler really receives request events.
+                await tab.send(nodriver.cdp.network.enable())
+
                 logger.info(
                     "DIAGNOSTIC: opening YouTube"
                 )
 
                 await tab.get(
-                    "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+                    "https://www.youtube.com/embed/jNQXAC9IVRw"
                 )
 
                 logger.info(
@@ -322,6 +326,10 @@ class PotokenExtractor:
 
         request = event.request
 
+        # DEBUG: show every POST request (shortened) to see what the page sends
+        if request.method == "POST":
+            logger.info("DEBUG POST: %s", request.url[:110])
+
         if "youtubei" in request.url:
 
             logger.info(
@@ -359,4 +367,3 @@ class PotokenExtractor:
         self._token_info = token_info
 
         self._extraction_done.set()
-                    
