@@ -16,3 +16,4 @@ RUN sed -i \
 RUN sed -i \
   "s#'/token': self.get_potoken,#'/token': self.get_potoken,\\n            '/get_pot': self.get_potoken,#" \
   /app/potoken_generator/server.py
+# rebuild trigger 2026-10-02
