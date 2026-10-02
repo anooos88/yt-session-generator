@@ -2,6 +2,10 @@ FROM ghcr.io/imputnet/yt-session-generator:webserver
 
 USER root
 
+# Verify Chromium path and version
+RUN which chromium && chromium --version
+
+# Replace extractor with our diagnostic version
 COPY potoken_generator/extractor.py /app/potoken_generator/extractor.py
 
 # Verify that our modified extractor is really inside the image
