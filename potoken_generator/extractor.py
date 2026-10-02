@@ -1,576 +1,317 @@
 import asyncio
-import dataclasses
 import json
 import logging
-import time
-from dataclasses import dataclass
 from pathlib import Path
-from tempfile import mkdtemp
 from typing import Optional
 
 import nodriver
 
+
 logger = logging.getLogger("extractor")
 
 
-@dataclass
 class TokenInfo:
-    updated: int
-    potoken: str
-    visitor_data: str
-
-    def to_json(self) -> str:
-        return json.dumps(dataclasses.asdict(self))
+    def __init__(self, visitor_data: str, potoken: str):
+        self.visitor_data = visitor_data
+        self.potoken = potoken
 
 
 class PotokenExtractor:
-
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
-        update_interval: float = 3600,
+        update_interval: int = 300,
         browser_path: Optional[Path] = None,
-    ) -> None:
-
+    ):
+        self.loop = loop
         self.update_interval = update_interval
         self.browser_path = browser_path
 
-        self.profile_path = mkdtemp()
+        self.profile_path = Path("/tmp/yt-session-profile")
 
-        self._loop = loop
-        self._token_info: Optional[TokenInfo] = None
+        self.token_info: Optional[TokenInfo] = None
 
-        self._ongoing_update = asyncio.Lock()
-        self._extraction_done = asyncio.Event()
-        self._update_requested = asyncio.Event()
+    async def update(self) -> Optional[TokenInfo]:
+        logger.info("DIAGNOSTIC: ================================")
+        logger.info("DIAGNOSTIC: update started")
+        logger.info("DIAGNOSTIC: browser_path=%s", self.browser_path)
+        logger.info("DIAGNOSTIC: profile=%s", self.profile_path)
 
-    def get(self) -> Optional[TokenInfo]:
-        return self._token_info
+        self.profile_path.mkdir(parents=True, exist_ok=True)
 
-    async def run_once(self) -> Optional[TokenInfo]:
-        await self._update()
-        return self.get()
-
-    async def run(self) -> None:
-
-        await self._update()
-
-        while True:
-
-            try:
-                await asyncio.wait_for(
-                    self._update_requested.wait(),
-                    timeout=self.update_interval,
-                )
-
-                logger.info("initiating force update")
-
-            except asyncio.TimeoutError:
-
-                logger.info("initiating scheduled update")
-
-            await self._update()
-
-            self._update_requested.clear()
-
-    def request_update(self) -> bool:
-
-        if self._ongoing_update.locked():
-            logger.info("update process is already running")
-            return False
-
-        if self._update_requested.is_set():
-            logger.info("force update has already been requested")
-            return False
-
-        self._loop.call_soon_threadsafe(
-            self._update_requested.set
-        )
-
-        logger.info("force update requested")
-
-        return True
-
-    @staticmethod
-    def _extract_token(
-        request: nodriver.cdp.network.Request,
-    ) -> Optional[TokenInfo]:
-
-        post_data = request.post_data
-
-        logger.info(
-            "DIAGNOSTIC: player request received, post_data=%s",
-            bool(post_data),
-        )
-
-        if not post_data:
-            logger.warning(
-                "DIAGNOSTIC: player request has no POST data"
-            )
-            return None
+        browser = None
 
         try:
+            logger.info("DIAGNOSTIC: launching Chromium")
 
-            post_data_json = json.loads(post_data)
-
-            visitor_data = (
-                post_data_json
-                ["context"]
-                ["client"]
-                ["visitorData"]
+            # Force Chromium executable explicitly.
+            # The official Alpine image installs Chromium at /usr/bin/chromium.
+            browser = await nodriver.start(
+                headless=False,
+                no_sandbox=True,
+                browser_executable_path=Path("/usr/bin/chromium"),
+                user_data_dir=self.profile_path,
             )
 
-            potoken = (
-                post_data_json
-                ["serviceIntegrityDimensions"]
-                ["poToken"]
-            )
+            logger.info("DIAGNOSTIC: Chromium started successfully")
 
-        except (
-            json.JSONDecodeError,
-            TypeError,
-            KeyError,
-        ) as error:
+            page = await browser.get("https://www.youtube.com/")
 
-            logger.warning(
-                "DIAGNOSTIC: failed to extract token: %s: %s",
-                type(error).__name__,
-                error,
-            )
+            logger.info("DIAGNOSTIC: YouTube page opened")
 
-            return None
+            await asyncio.sleep(5)
 
-        if not visitor_data:
-            logger.warning(
-                "DIAGNOSTIC: visitorData is empty"
-            )
-            return None
+            try:
+                logger.info(
+                    "DIAGNOSTIC: current URL=%s",
+                    page.url,
+                )
+            except Exception as e:
+                logger.warning(
+                    "DIAGNOSTIC: unable to read current URL: %s",
+                    e,
+                )
 
-        if not potoken:
-            logger.warning(
-                "DIAGNOSTIC: poToken is empty"
-            )
-            return None
+            try:
+                title = await page.evaluate("document.title")
+                logger.info(
+                    "DIAGNOSTIC: page title=%s",
+                    title,
+                )
+            except Exception as e:
+                logger.warning(
+                    "DIAGNOSTIC: unable to read page title: %s",
+                    e,
+                )
 
-        logger.info(
-            "DIAGNOSTIC: visitorData length=%d",
-            len(visitor_data),
-        )
+            try:
+                body_preview = await page.evaluate(
+                    """
+                    (() => {
+                        const body = document.body;
+                        if (!body) return "";
+                        return body.innerText.substring(0, 1000);
+                    })()
+                    """
+                )
 
-        logger.info(
-            "DIAGNOSTIC: poToken length=%d",
-            len(potoken),
-        )
+                logger.info(
+                    "DIAGNOSTIC: body preview=%s",
+                    body_preview,
+                )
 
-        return TokenInfo(
-            updated=int(time.time()),
-            potoken=potoken,
-            visitor_data=visitor_data,
-        )
+            except Exception as e:
+                logger.warning(
+                    "DIAGNOSTIC: unable to read body: %s",
+                    e,
+                )
 
-    async def _update(self) -> None:
-
-        try:
-
-            await asyncio.wait_for(
-                self._perform_update(),
-                timeout=600,
-            )
-
-        except asyncio.TimeoutError:
-
-            logger.error(
-                "DIAGNOSTIC: hard update timeout exceeded"
-            )
-
-        except Exception:
-
-            logger.exception(
-                "DIAGNOSTIC: update crashed"
-            )
-
-    async def _perform_update(self) -> None:
-
-        if self._ongoing_update.locked():
+            # Open a known YouTube video.
+            video_url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
             logger.info(
-                "DIAGNOSTIC: update is already in progress"
+                "DIAGNOSTIC: opening test video=%s",
+                video_url,
             )
 
-            return
+            page = await browser.get(video_url)
 
-        async with self._ongoing_update:
-
-            logger.info(
-                "DIAGNOSTIC: ================================"
-            )
+            await asyncio.sleep(5)
 
             logger.info(
-                "DIAGNOSTIC: update started"
-            )
-
-            logger.info(
-                "DIAGNOSTIC: browser_path=%s",
-                self.browser_path,
-            )
-
-            logger.info(
-                "DIAGNOSTIC: profile=%s",
-                self.profile_path,
-            )
-
-            self._extraction_done.clear()
-
-            logger.info(
-                "DIAGNOSTIC: launching Chromium"
+                "DIAGNOSTIC: test video page loaded, url=%s",
+                page.url,
             )
 
             try:
-
-                browser = await nodriver.start(
-                    headless=False,
-                    no_sandbox=True,
-                    browser_executable_path=self.browser_path,
-                    user_data_dir=self.profile_path,
+                title = await page.evaluate("document.title")
+                logger.info(
+                    "DIAGNOSTIC: video title=%s",
+                    title,
+                )
+            except Exception as e:
+                logger.warning(
+                    "DIAGNOSTIC: unable to read video title: %s",
+                    e,
                 )
 
-            except FileNotFoundError as error:
-
-                logger.exception(
-                    "DIAGNOSTIC: Chromium executable was not found"
-                )
-
-                raise FileNotFoundError(
-                    "Could not find Chromium. "
-                    "Make sure Chromium is installed."
-                ) from error
-
-            except Exception:
-
-                logger.exception(
-                    "DIAGNOSTIC: Chromium failed to start"
-                )
-
-                raise
-
-            logger.info(
-                "DIAGNOSTIC: Chromium started successfully"
-            )
-
+            # Search for YouTube player.
             try:
+                player = await page.select("#movie_player")
 
-                tab = browser.main_tab
-
-                logger.info(
-                    "DIAGNOSTIC: main tab acquired"
-                )
-
-                tab.add_handler(
-                    nodriver.cdp.network.RequestWillBeSent,
-                    self._send_handler,
-                )
-
-                logger.info(
-                    "DIAGNOSTIC: network request handler installed"
-                )
-
-                youtube_url = (
-                    "https://www.youtube.com/watch?v=jNQXAC9IVRw"
-                )
-
-                logger.info(
-                    "DIAGNOSTIC: opening YouTube URL: %s",
-                    youtube_url,
-                )
-
-                await tab.get(youtube_url)
-
-                logger.info(
-                    "DIAGNOSTIC: YouTube page opened"
-                )
-
-                await asyncio.sleep(5)
-
-                try:
-
-                    current_url = await tab.evaluate(
-                        "window.location.href"
-                    )
-
+                if player:
                     logger.info(
-                        "DIAGNOSTIC: current URL=%s",
-                        current_url,
+                        "DIAGNOSTIC: #movie_player found"
                     )
 
-                except Exception:
-
-                    logger.exception(
-                        "DIAGNOSTIC: failed to read current URL"
-                    )
-
-                try:
-
-                    page_title = await tab.evaluate(
-                        "document.title"
-                    )
-
-                    logger.info(
-                        "DIAGNOSTIC: page title=%s",
-                        page_title,
-                    )
-
-                except Exception:
-
-                    logger.exception(
-                        "DIAGNOSTIC: failed to read page title"
-                    )
-
-                try:
-
-                    body_text = await tab.evaluate(
-                        "document.body ? document.body.innerText : ''"
-                    )
-
-                    if body_text:
-
-                        clean_text = " ".join(
-                            body_text.split()
-                        )
-
+                    try:
+                        await player.click()
                         logger.info(
-                            "DIAGNOSTIC: page text preview=%s",
-                            clean_text[:1000],
+                            "DIAGNOSTIC: clicked #movie_player"
                         )
-
-                    else:
-
+                    except Exception as e:
                         logger.warning(
-                            "DIAGNOSTIC: page body is empty"
+                            "DIAGNOSTIC: player click failed: %s",
+                            e,
                         )
-
-                except Exception:
-
-                    logger.exception(
-                        "DIAGNOSTIC: failed to read page text"
-                    )
-
-                player_clicked = await self._click_on_player(tab)
-
-                logger.info(
-                    "DIAGNOSTIC: player_clicked=%s",
-                    player_clicked,
-                )
-
-                if player_clicked:
-
-                    logger.info(
-                        "DIAGNOSTIC: waiting for player API request"
-                    )
-
-                    success = await self._wait_for_handler()
-
-                    logger.info(
-                        "DIAGNOSTIC: token extraction wait result=%s",
-                        success,
-                    )
 
                 else:
-
                     logger.warning(
-                        "DIAGNOSTIC: player was not clicked"
+                        "DIAGNOSTIC: #movie_player not found"
                     )
 
-            finally:
-
-                logger.info(
-                    "DIAGNOSTIC: closing browser"
-                )
-
-                try:
-                    await tab.close()
-                except Exception:
-                    logger.exception(
-                        "DIAGNOSTIC: failed to close tab"
-                    )
-
-                try:
-                    browser.stop()
-                except Exception:
-                    logger.exception(
-                        "DIAGNOSTIC: failed to stop browser"
-                    )
-
-                logger.info(
-                    "DIAGNOSTIC: browser stopped"
-                )
-
-            logger.info(
-                "DIAGNOSTIC: update finished"
-            )
-
-            logger.info(
-                "DIAGNOSTIC: ================================"
-            )
-
-    @staticmethod
-    async def _click_on_player(
-        tab: nodriver.Tab,
-    ) -> bool:
-
-        logger.info(
-            "DIAGNOSTIC: looking for YouTube player"
-        )
-
-        try:
-
-            player = await tab.select(
-                "#movie_player",
-                15,
-            )
-
-        except asyncio.TimeoutError:
-
-            logger.warning(
-                "DIAGNOSTIC: unable to locate #movie_player"
-            )
-
-            return False
-
-        except Exception:
-
-            logger.exception(
-                "DIAGNOSTIC: error locating #movie_player"
-            )
-
-            return False
-
-        if player is None:
-
-            logger.warning(
-                "DIAGNOSTIC: #movie_player returned None"
-            )
-
-            return False
-
-        logger.info(
-            "DIAGNOSTIC: #movie_player found"
-        )
-
-        try:
-
-            await player.click()
-
-            logger.info(
-                "DIAGNOSTIC: YouTube player clicked successfully"
-            )
-
-            return True
-
-        except Exception:
-
-            logger.exception(
-                "DIAGNOSTIC: failed to click YouTube player"
-            )
-
-            return False
-
-    async def _wait_for_handler(self) -> bool:
-
-        logger.info(
-            "DIAGNOSTIC: waiting up to 60 seconds "
-            "for /youtubei/v1/player"
-        )
-
-        try:
-
-            await asyncio.wait_for(
-                self._extraction_done.wait(),
-                timeout=60,
-            )
-
-        except asyncio.TimeoutError:
-
-            logger.warning(
-                "DIAGNOSTIC: timeout waiting for "
-                "outgoing YouTube player API request"
-            )
-
-            if self._token_info is None:
-
+            except Exception as e:
                 logger.warning(
-                    "DIAGNOSTIC: no token has been extracted"
+                    "DIAGNOSTIC: player lookup failed: %s",
+                    e,
                 )
 
-            return False
-
-        logger.info(
-            "DIAGNOSTIC: token extraction event received"
-        )
-
-        return True
-
-    async def _send_handler(
-        self,
-        event: nodriver.cdp.network.RequestWillBeSent,
-    ) -> None:
-
-        request = event.request
-
-        if "youtubei" in request.url:
-
             logger.info(
-                "YOUTUBE REQUEST: %s %s",
-                request.method,
-                request.url,
+                "DIAGNOSTIC: waiting for YouTube player requests"
             )
 
-        if request.method != "POST":
-            return
+            # Give YouTube enough time to issue player requests.
+            await asyncio.sleep(10)
 
-        if "/youtubei/v1/player" not in request.url:
-            return
+            # Try to extract visitorData and poToken from page globals.
+            visitor_data = None
+            po_token = None
 
-        logger.info(
-            "DIAGNOSTIC: ================================"
-        )
+            try:
+                result = await page.evaluate(
+                    """
+                    (() => {
+                        const result = {
+                            visitorData: null,
+                            poToken: null
+                        };
 
-        logger.info(
-            "DIAGNOSTIC: YouTube player API request detected"
-        )
+                        try {
+                            if (window.ytInitialPlayerResponse) {
+                                const pr = window.ytInitialPlayerResponse;
 
-        logger.info(
-            "DIAGNOSTIC: URL=%s",
-            request.url,
-        )
+                                if (
+                                    pr.responseContext &&
+                                    pr.responseContext.mainAppWebResponseContext
+                                ) {
+                                    result.visitorData =
+                                        pr.responseContext
+                                          .mainAppWebResponseContext
+                                          .loggedOutData
+                                          ?.visitorData || null;
+                                }
+                            }
+                        } catch (e) {}
 
-        token_info = self._extract_token(request)
+                        try {
+                            const html = document.documentElement.innerHTML;
 
-        if token_info is None:
+                            const visitorMatch =
+                                html.match(/visitorData["']?\\s*[:=]\\s*["']([^"']+)/);
+
+                            if (visitorMatch) {
+                                result.visitorData = visitorMatch[1];
+                            }
+                        } catch (e) {}
+
+                        return result;
+                    })()
+                    """
+                )
+
+                if result:
+                    visitor_data = result.get("visitorData")
+                    po_token = result.get("poToken")
+
+                logger.info(
+                    "DIAGNOSTIC: page extraction result=%s",
+                    json.dumps(result, ensure_ascii=False),
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "DIAGNOSTIC: page token extraction failed: %s",
+                    e,
+                )
+
+            if visitor_data:
+                logger.info(
+                    "DIAGNOSTIC: visitor_data found, length=%d",
+                    len(visitor_data),
+                )
+            else:
+                logger.warning(
+                    "DIAGNOSTIC: visitor_data NOT found"
+                )
+
+            if po_token:
+                logger.info(
+                    "DIAGNOSTIC: poToken found, length=%d",
+                    len(po_token),
+                )
+            else:
+                logger.warning(
+                    "DIAGNOSTIC: poToken NOT found"
+                )
+
+            # At this stage the main purpose is diagnosing Chromium startup
+            # and YouTube token extraction.
+            if visitor_data and po_token:
+                self.token_info = TokenInfo(
+                    visitor_data=visitor_data,
+                    potoken=po_token,
+                )
+
+                logger.info(
+                    "DIAGNOSTIC: token extraction successful"
+                )
+
+                return self.token_info
 
             logger.warning(
-                "DIAGNOSTIC: player request did not contain "
-                "a usable poToken/visitorData pair"
+                "DIAGNOSTIC: token extraction incomplete"
             )
 
-            return
+            return None
 
-        logger.info(
-            "DIAGNOSTIC: NEW TOKEN EXTRACTED"
-        )
-
-        logger.info(
-            "DIAGNOSTIC: token=%s",
-            token_info.to_json(),
-        )
-
-        self._token_info = token_info
-
-        self._extraction_done.set()
-
-        logger.info(
-            "DIAGNOSTIC: extraction event set"
-        )
-
-        logger.info(
-            "DIAGNOSTIC: ================================"
+        except Exception:
+            logger.exception(
+                "DIAGNOSTIC: Chromium failed to start or extraction failed"
             )
+
+            return None
+
+        finally:
+            if browser is not None:
+                try:
+                    logger.info(
+                        "DIAGNOSTIC: closing Chromium"
+                    )
+
+                    browser.stop()
+
+                except Exception as e:
+                    logger.warning(
+                        "DIAGNOSTIC: browser shutdown failed: %s",
+                        e,
+                    )
+
+    async def run_once(self) -> Optional[TokenInfo]:
+        return await self.update()
+
+    async def run(self):
+        while True:
+            try:
+                await self.update()
+
+            except Exception:
+                logger.exception(
+                    "DIAGNOSTIC: update loop failed"
+                )
+
+            logger.info(
+                "DIAGNOSTIC: sleeping for %s seconds",
+                self.update_interval,
+            )
+
+            await asyncio.sleep(self.update_interval)
