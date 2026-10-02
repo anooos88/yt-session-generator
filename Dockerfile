@@ -2,12 +2,12 @@ FROM ghcr.io/imputnet/yt-session-generator:webserver
 
 USER root
 
-# Run Chromium without sandbox when running as root
+# Fix Chromium when running as root
 RUN sed -i \
-  's/nodriver.start(headless=False,/nodriver.start(headless=False, no_sandbox=True,/' \
+  's/nodriver.start(headless=False, sandbox=False,/nodriver.start(headless=False, no_sandbox=True,/' \
   /app/potoken_generator/extractor.py
 
-# Diagnostic: log every YouTube youtubei request seen by Chromium
+# Diagnostic: log every YouTube youtubei request
 RUN sed -i \
   "/if not event.request.method == 'POST':/i\\        if 'youtubei' in event.request.url:\\n            logger.info(f'YOUTUBE REQUEST: {event.request.method} {event.request.url}')" \
   /app/potoken_generator/extractor.py
