@@ -1,20 +1,5 @@
-version: '3.8'
-
-services:
-  cobalt-api:
-    image: ghcr.io/imputnet/cobalt:11
-    restart: unless-stopped
-    ports:
-      - "9000:9000"
-    environment:
-      API_URL: "https://cobalt.anas.blitz.cloud"
-      # ربط حاوية Cobalt بخدمة المولد الداخلية
-      API_YOUTUBE_POT_URL: "http://yt-pot-provider:8080/token"
-    depends_on:
-      - yt-pot-provider
-
-  # خدمة توليد رموز يوتيوب poToken
   yt-pot-provider:
+    # استخدام الصورة الرسمية المحدثة والمعدة للتخفي تلقائياً
     image: ghcr.io/imputnet/yt-session-generator:webserver
     restart: unless-stopped
     
